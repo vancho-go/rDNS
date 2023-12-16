@@ -1,1 +1,1 @@
-# rdns
+# rDNS
