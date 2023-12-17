@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/stdlib"
+	"github.com/vancho-go/rDNS/internal/app/dnslookuper"
 	"github.com/vancho-go/rDNS/internal/app/models"
+	"log/slog"
 )
 
 type Storage struct {
@@ -40,9 +42,9 @@ func createIfNotExists(db *sql.DB) error {
 			id SERIAL PRIMARY KEY,
 			fqdn VARCHAR(255) NOT NULL,
 			ip_address INET DEFAULT NULL REFERENCES ip_addresses(ip_address) ON DELETE CASCADE,
-			ttl INTEGER DEFAULT NULL,
-			last_ip_address_update TIMESTAMP DEFAULT NULL,
-			outdated BOOLEAN DEFAULT FALSE NOT NULL
+			ttl TIMESTAMP WITHOUT TIME ZONE DEFAULT NULL,
+			outdated BOOLEAN DEFAULT FALSE NOT NULL,
+			UNIQUE(fqdn, ip_address)
 		);
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_fqdns_non_null_ip ON fqdns(fqdn, ip_address, outdated) WHERE ip_address IS NOT NULL;
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_fqdns_null_ip ON fqdns(fqdn, outdated) WHERE ip_address IS NULL;`
@@ -63,37 +65,6 @@ func createIfNotExists(db *sql.DB) error {
 	}
 	return nil
 }
-
-//func (s *Storage) UploadFQDN(ctx context.Context, fqdns []models.APIUploadFQDNRequest) error {
-//	tx, err := s.DB.BeginTx(ctx, nil)
-//	if err != nil {
-//		return fmt.Errorf("uploadFQDN: error starting transaction: %w", err)
-//	}
-//	defer tx.Rollback()
-//
-//	stmt, err := tx.PrepareContext(ctx, pq.CopyIn("fqdns", "fqdn"))
-//	if err != nil {
-//		return fmt.Errorf("uploadFQDN: error preparing statement: %w", err)
-//	}
-//	defer stmt.Close()
-//
-//	for _, fqdn := range fqdns {
-//		_, err = stmt.ExecContext(ctx, fqdn.FQDN)
-//		if err != nil {
-//			return fmt.Errorf("uploadFQDN: error inserting FQDN %s: %w", fqdn.FQDN, err)
-//		}
-//	}
-//
-//	_, err = stmt.ExecContext(ctx)
-//	if err != nil {
-//		return fmt.Errorf("uploadFQDN: %w", err)
-//	}
-//
-//	if err := tx.Commit(); err != nil {
-//		return fmt.Errorf("uploadFQDN: error committing transaction: %w", err)
-//	}
-//	return nil
-//}
 
 func (s *Storage) UploadFQDN(ctx context.Context, fqdns []models.APIUploadFQDNRequest) error {
 
@@ -125,10 +96,10 @@ func (s *Storage) UploadFQDN(ctx context.Context, fqdns []models.APIUploadFQDNRe
 	}
 
 	_, err = tx.Exec(ctx, `
-        INSERT INTO fqdns (fqdn)
-        SELECT fqdn FROM temp_fqdns
-        ON CONFLICT (fqdn, outdated) WHERE ip_address IS NULL DO NOTHING
-    `)
+       INSERT INTO fqdns (fqdn)
+       SELECT fqdn FROM temp_fqdns
+       ON CONFLICT (fqdn, outdated) WHERE ip_address IS NULL DO NOTHING
+   `)
 	if err != nil {
 		return fmt.Errorf("uploadFQDN: error inserting data from temp table: %w", err)
 	}
@@ -146,4 +117,75 @@ func fqdnsToPgxRows(requests []models.APIUploadFQDNRequest) [][]interface{} {
 		rows = append(rows, []interface{}{req.FQDN})
 	}
 	return rows
+}
+
+func (s *Storage) UpdateDNSRecords() {
+	rows, err := s.DB.Query("SELECT fqdn FROM fqdns WHERE outdated=false and(ttl<NOW() or ttl is null )")
+	if err != nil {
+		slog.Error(fmt.Errorf("updateDNSRecords: error selecting fqdns: %w", err).Error())
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var fqdn string
+		if err := rows.Scan(&fqdn); err != nil {
+			slog.Error(fmt.Errorf("updateDNSRecords: error coping fqdn to var: %w", err).Error())
+			continue
+		}
+
+		resolverResponse, err := dnslookuper.ResolveDNSWithTTL(fqdn)
+		if err != nil {
+			slog.Error(fmt.Errorf("updateDNSRecords: error resolving fqdn: %w", err).Error())
+			continue
+		}
+
+		tx, err := s.DB.Begin()
+		if err != nil {
+			slog.Error(fmt.Errorf("updateDNSRecords: error beginning transaction: %w", err).Error())
+			return
+		}
+		defer tx.Rollback()
+
+		_, err = tx.Exec("UPDATE fqdns SET outdated = TRUE WHERE fqdn = $1", fqdn)
+		if err != nil {
+			slog.Error(fmt.Errorf("updateDNSRecords: error updating outdated fields: %w", err).Error())
+			return
+		}
+
+		for _, rr := range resolverResponse {
+			ipAddress := rr.IPAddress
+			expiresAt := rr.ExpiresAt
+
+			_, err := tx.Exec(`INSERT INTO ip_addresses (ip_address) VALUES ($1)
+			ON CONFLICT (ip_address) DO NOTHING;`, ipAddress)
+			if err != nil {
+				slog.Error(fmt.Errorf("updateDNSRecords: error inserting ip addresses: %w", err).Error())
+				return
+			}
+
+			_, err = tx.Exec(`
+			INSERT INTO fqdns (fqdn, ip_address, ttl, outdated)
+			VALUES ($1, $2, $3, FALSE)
+			ON CONFLICT (fqdn, ip_address) 
+			DO UPDATE SET ttl = EXCLUDED.ttl, outdated = FALSE WHERE fqdns.fqdn = EXCLUDED.fqdn AND fqdns.ip_address = EXCLUDED.ip_address;`, fqdn, ipAddress, expiresAt)
+
+			if err != nil {
+				slog.Error(fmt.Errorf("updateDNSRecords: error inserting into fqdn: %w", err).Error())
+				return
+			}
+		}
+
+		_, err = tx.Exec("DELETE FROM fqdns WHERE fqdn = $1 AND ip_address IS NULL", fqdn)
+		if err != nil {
+			slog.Error(fmt.Errorf("updateDNSRecords: error deleting FQDNs with NULL ip: %w", err).Error())
+			return
+		}
+
+		err = tx.Commit()
+		if err != nil {
+			slog.Error(fmt.Errorf("updateDNSRecords: error committing transaction: %w", err).Error())
+			return
+		}
+	}
 }

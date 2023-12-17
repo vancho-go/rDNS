@@ -4,6 +4,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/vancho-go/rDNS/internal/app/storage"
 	"log"
+	"net/http"
 )
 
 // only for testing purposes
@@ -26,4 +27,9 @@ func main() {
 			r.Get("/ip", nil)
 		})
 	})
+
+	err = http.ListenAndServe(":8090", r)
+	if err != nil {
+		log.Fatalf("error starting server: %w", err)
+	}
 }

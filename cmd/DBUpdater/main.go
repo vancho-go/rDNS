@@ -6,6 +6,7 @@ import (
 	"github.com/vancho-go/rDNS/internal/app/storage"
 	"log"
 	"net/http"
+	"time"
 )
 
 // only for testing purposes
@@ -19,6 +20,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("error initialising database: %s", err.Error())
 	}
+
+	go func() {
+		for {
+			dbInstance.UpdateDNSRecords()
+			time.Sleep(10 * time.Second)
+		}
+	}()
 
 	r := chi.NewRouter()
 

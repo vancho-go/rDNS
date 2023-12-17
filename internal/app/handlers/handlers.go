@@ -23,7 +23,6 @@ func UploadFQDNList(uploader FQDNUploader) http.HandlerFunc {
 			return
 		}
 
-		res.WriteHeader(http.StatusOK)
 		err := uploader.UploadFQDN(req.Context(), FQDNs)
 		if err != nil {
 			slog.ErrorContext(req.Context(), err.Error())
