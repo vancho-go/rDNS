@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/go-chi/chi/v5"
+	"github.com/vancho-go/rDNS/internal/app/handlers"
 	"github.com/vancho-go/rDNS/internal/app/storage"
 	"log"
 	"net/http"
@@ -24,7 +25,7 @@ func main() {
 
 	r.Route("/api", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
-			r.Get("/ip", nil)
+			r.Get("/ip", handlers.GetFQNDs(dbInstance))
 		})
 	})
 

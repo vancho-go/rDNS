@@ -189,3 +189,35 @@ func (s *Storage) UpdateDNSRecords() {
 		}
 	}
 }
+
+func (s *Storage) GetFQDN(ctx context.Context, ipAddresses models.APIGetFQDNsRequest) (models.APIGetFQDNsResponse, error) {
+	result := models.APIGetFQDNsResponse{make(map[string][]string, len(ipAddresses.IPAddresses))}
+	for _, ip := range ipAddresses.IPAddresses {
+		fqdns := []string{}
+		query := `SELECT fqdn FROM fqdns WHERE ip_address = $1;`
+		rows, err := s.DB.Query(query, ip)
+		if err != nil {
+			return models.APIGetFQDNsResponse{}, fmt.Errorf("getFQDN: error getting fqdns: %w", err)
+		}
+
+		defer rows.Close()
+
+		for rows.Next() {
+			var fqdn string
+			if err := rows.Scan(&fqdn); err != nil {
+				return models.APIGetFQDNsResponse{}, fmt.Errorf("getFQDN: error scanning column: %w", err)
+			}
+			fqdns = append(fqdns, fqdn)
+		}
+
+		if err = rows.Err(); err != nil {
+			return models.APIGetFQDNsResponse{}, fmt.Errorf("getFQDN: rows error: %w", err)
+		}
+
+		result.IPAddresses[ip] = fqdns
+		if err := rows.Close(); err != nil {
+			return models.APIGetFQDNsResponse{}, fmt.Errorf("getFQDN: rows close error: %w", err)
+		}
+	}
+	return result, nil
+}

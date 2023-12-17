@@ -24,7 +24,7 @@ func main() {
 	go func() {
 		for {
 			dbInstance.UpdateDNSRecords()
-			time.Sleep(10 * time.Second)
+			time.Sleep(1 * time.Minute)
 		}
 	}()
 
