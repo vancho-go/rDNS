@@ -13,7 +13,7 @@ type FQDNUploader interface {
 }
 
 type FQDNGetter interface {
-	GetFQDN(context.Context, models.APIGetFQDNsRequest) (models.APIGetFQDNsResponse, error)
+	GetFQDNs(context.Context, models.APIGetFQDNsRequest) (models.APIGetFQDNsResponse, error)
 }
 
 func UploadFQDNList(uploader FQDNUploader) http.HandlerFunc {
@@ -45,7 +45,7 @@ func GetFQNDs(fg FQDNGetter) http.HandlerFunc {
 			return
 		}
 
-		fqdns, err := fg.GetFQDN(req.Context(), ipAddresses)
+		fqdns, err := fg.GetFQDNs(req.Context(), ipAddresses)
 		if err != nil {
 			slog.ErrorContext(req.Context(), err.Error())
 			http.Error(res, "Something went wrong", http.StatusInternalServerError)

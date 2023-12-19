@@ -149,8 +149,8 @@ func (s *Storage) UpdateDNSRecords(ctx context.Context) {
 			stageUpdateFQDNChannels = append(stageUpdateFQDNChannels, updateFQDNChannel)
 			errors = append(errors, updateFQDNErrors)
 		}
-		stageUpdateFQDNMerged := mergeFQDNChans(ctx, stageUpdateFQDNChannels...)
-		errorsMerged := mergeErrorChans(ctx, errors...)
+		stageUpdateFQDNMerged := mergeChannels(ctx, stageUpdateFQDNChannels...)
+		errorsMerged := mergeChannels(ctx, errors...)
 
 		s.fqdnConsumer(ctx, cancel, stageUpdateFQDNMerged, errorsMerged)
 	}
@@ -278,39 +278,11 @@ func (s *Storage) updateDNSRecord(ctx context.Context, fqdn string) error {
 	return nil
 }
 
-func mergeFQDNChans(ctx context.Context, cfqdn ...<-chan string) <-chan string {
+func mergeChannels[T any](ctx context.Context, ce ...<-chan T) <-chan T {
 	var wg sync.WaitGroup
-	out := make(chan string)
+	out := make(chan T)
 
-	output := func(c <-chan string) {
-		defer wg.Done()
-		for n := range c {
-			select {
-			case out <- n:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}
-
-	wg.Add(len(cfqdn))
-	for _, c := range cfqdn {
-		go output(c)
-	}
-
-	go func() {
-		wg.Wait()
-		close(out)
-	}()
-
-	return out
-}
-
-func mergeErrorChans(ctx context.Context, ce ...<-chan error) <-chan error {
-	var wg sync.WaitGroup
-	out := make(chan error)
-
-	output := func(c <-chan error) {
+	output := func(c <-chan T) {
 		defer wg.Done()
 		for n := range c {
 			select {
@@ -324,6 +296,7 @@ func mergeErrorChans(ctx context.Context, ce ...<-chan error) <-chan error {
 	wg.Add(len(ce))
 	for _, c := range ce {
 		go output(c)
+
 	}
 
 	go func() {
@@ -358,12 +331,12 @@ func (s *Storage) fqdnConsumer(ctx context.Context, cancel context.CancelFunc, f
 	}
 }
 
-func (s *Storage) GetFQDN(ctx context.Context, ipAddresses models.APIGetFQDNsRequest) (models.APIGetFQDNsResponse, error) {
+func (s *Storage) GetFQDNs(ctx context.Context, ipAddresses models.APIGetFQDNsRequest) (models.APIGetFQDNsResponse, error) {
 	result := models.APIGetFQDNsResponse{make(map[string][]string, len(ipAddresses.IPAddresses))}
 	for _, ip := range ipAddresses.IPAddresses {
 		fqdns := []string{}
 		query := `SELECT fqdn FROM fqdns WHERE ip_address = $1;`
-		rows, err := s.DB.Query(query, ip)
+		rows, err := s.DB.QueryContext(ctx, query, ip)
 		if err != nil {
 			return models.APIGetFQDNsResponse{}, fmt.Errorf("getFQDN: error getting fqdns: %w", err)
 		}
