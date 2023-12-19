@@ -317,7 +317,7 @@ func (s *Storage) fqdnConsumer(ctx context.Context, cancel context.CancelFunc, f
 
 		case err, ok := <-errors:
 			if ok {
-				cancel()
+				//cancel()
 				log.Println(err.Error())
 			}
 
