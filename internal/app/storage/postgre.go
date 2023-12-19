@@ -9,7 +9,6 @@ import (
 	"github.com/vancho-go/rDNS/internal/app/dnslookuper"
 	"github.com/vancho-go/rDNS/internal/app/models"
 	"log"
-	"log/slog"
 	"runtime"
 	"sync"
 )
@@ -122,104 +121,39 @@ func fqdnsToPgxRows(requests []models.APIUploadFQDNRequest) [][]interface{} {
 	return rows
 }
 
-func (s *Storage) UpdateDNSRecords() {
-	rows, err := s.DB.Query("SELECT fqdn FROM fqdns WHERE outdated=false and(ttl<NOW() or ttl is null )")
-	if err != nil {
-		slog.Error(fmt.Errorf("updateDNSRecords: error selecting fqdns: %w", err).Error())
-		return
-	}
-	defer rows.Close()
+func (s *Storage) UpdateDNSRecords(ctx context.Context) {
+	//	здесь будут запускаться задачи
 
-	for rows.Next() {
-		var fqdn string
-		if err := rows.Scan(&fqdn); err != nil {
-			slog.Error(fmt.Errorf("updateDNSRecords: error coping fqdn to var: %w", err).Error())
-			continue
-		}
+	select {
+	case <-ctx.Done():
+		fmt.Println("updateDNSRecords: update task cancelled by context")
+	default:
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
 
-		resolverResponse, err := dnslookuper.ResolveDNSWithTTL(fqdn)
+		outputFQDNsChannel, err := s.getOutdatedDNSRecords(ctx)
 		if err != nil {
-			slog.Error(fmt.Errorf("updateDNSRecords: error resolving fqdn: %w", err).Error())
-			continue
-		}
-
-		tx, err := s.DB.Begin()
-		if err != nil {
-			slog.Error(fmt.Errorf("updateDNSRecords: error beginning transaction: %w", err).Error())
-			return
-		}
-		defer tx.Rollback()
-
-		_, err = tx.Exec("UPDATE fqdns SET outdated = TRUE WHERE fqdn = $1", fqdn)
-		if err != nil {
-			slog.Error(fmt.Errorf("updateDNSRecords: error updating outdated fields: %w", err).Error())
+			log.Println(err)
 			return
 		}
 
-		for _, rr := range resolverResponse {
-			ipAddress := rr.IPAddress
-			expiresAt := rr.ExpiresAt
+		var stageUpdateFQDNChannels []<-chan string
+		var errors []<-chan error
 
-			_, err := tx.Exec(`INSERT INTO ip_addresses (ip_address) VALUES ($1)
-			ON CONFLICT (ip_address) DO NOTHING;`, ipAddress)
+		for i := 0; i < runtime.NumCPU(); i++ {
+			updateFQDNChannel, updateFQDNErrors, err := s.prepareAndUpdateDNSRecord(ctx, outputFQDNsChannel)
 			if err != nil {
-				slog.Error(fmt.Errorf("updateDNSRecords: error inserting ip addresses: %w", err).Error())
+				log.Println(err)
 				return
 			}
-
-			_, err = tx.Exec(`
-			INSERT INTO fqdns (fqdn, ip_address, ttl, outdated)
-			VALUES ($1, $2, $3, FALSE)
-			ON CONFLICT (fqdn, ip_address)
-			DO UPDATE SET ttl = EXCLUDED.ttl, outdated = FALSE WHERE fqdns.fqdn = EXCLUDED.fqdn AND fqdns.ip_address = EXCLUDED.ip_address;`, fqdn, ipAddress, expiresAt)
-
-			if err != nil {
-				slog.Error(fmt.Errorf("updateDNSRecords: error inserting into fqdn: %w", err).Error())
-				return
-			}
+			stageUpdateFQDNChannels = append(stageUpdateFQDNChannels, updateFQDNChannel)
+			errors = append(errors, updateFQDNErrors)
 		}
+		stageUpdateFQDNMerged := mergeFQDNChans(ctx, stageUpdateFQDNChannels...)
+		errorsMerged := mergeErrorChans(ctx, errors...)
 
-		_, err = tx.Exec("DELETE FROM fqdns WHERE fqdn = $1 AND ip_address IS NULL", fqdn)
-		if err != nil {
-			slog.Error(fmt.Errorf("updateDNSRecords: error deleting FQDNs with NULL ip: %w", err).Error())
-			return
-		}
-
-		err = tx.Commit()
-		if err != nil {
-			slog.Error(fmt.Errorf("updateDNSRecords: error committing transaction: %w", err).Error())
-			return
-		}
+		s.fqdnConsumer(ctx, cancel, stageUpdateFQDNMerged, errorsMerged)
 	}
-}
-
-func (s *Storage) UpdateDNSRecordsNew(ctx context.Context) {
-	//	это замена main, здесь будут запускаться задачи
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	outputFQDNsChannel, err := s.getOutdatedDNSRecords(ctx)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	var stageUpdateFQDNChannels []<-chan string
-	var errors []<-chan error
-
-	for i := 0; i < runtime.NumCPU(); i++ {
-		updateFQDNChannel, updateFQDNErrors, err := s.prepareAndUpdateDNSRecord(ctx, outputFQDNsChannel)
-		if err != nil {
-			log.Fatal(err)
-		}
-		stageUpdateFQDNChannels = append(stageUpdateFQDNChannels, updateFQDNChannel)
-		errors = append(errors, updateFQDNErrors)
-	}
-	stageUpdateFQDNMerged := mergeFQDNChans(ctx, stageUpdateFQDNChannels...)
-	errorsMerged := mergeErrorChans(ctx, errors...)
-
-	s.sink(ctx, cancel, stageUpdateFQDNMerged, errorsMerged)
-
 }
 
 func (s *Storage) getOutdatedDNSRecords(ctx context.Context) (<-chan string, error) {
@@ -229,7 +163,7 @@ func (s *Storage) getOutdatedDNSRecords(ctx context.Context) (<-chan string, err
 
 	rows, err := s.DB.Query("SELECT DISTINCT fqdn FROM fqdns WHERE outdated=false and(ttl<NOW() or ttl is null )")
 	if err != nil {
-		slog.Error(fmt.Errorf("updateDNSRecords: error selecting fqdns: %w", err).Error())
+		return nil, fmt.Errorf("getOutdatedDNSRecords: error selecting fqdns: %w", err)
 	}
 
 	go func() {
@@ -240,7 +174,7 @@ func (s *Storage) getOutdatedDNSRecords(ctx context.Context) (<-chan string, err
 
 			var fqdn string
 			if err := rows.Scan(&fqdn); err != nil {
-				slog.Error(fmt.Errorf("updateDNSRecords: error coping fqdn to var: %w", err).Error())
+				log.Println(fmt.Errorf("getOutdatedDNSRecords: error coping fqdn to var: %w", err).Error())
 				continue
 			}
 
@@ -252,8 +186,7 @@ func (s *Storage) getOutdatedDNSRecords(ctx context.Context) (<-chan string, err
 
 		}
 		if err := rows.Err(); err != nil {
-			slog.Error(fmt.Errorf("updateDNSRecords: error after iterating rows: %w", err).Error())
-			// Здесь можно также отправить ошибку в отдельный канал ошибок, если он есть.
+			log.Println(fmt.Errorf("getOutdatedDNSRecords: error after iterating rows: %w", err).Error())
 			return
 		}
 	}()
@@ -278,7 +211,7 @@ func (s *Storage) prepareAndUpdateDNSRecord(ctx context.Context, fqdns <-chan st
 				if err != nil {
 					errorChannel <- err
 				} else {
-					outChannel <- fmt.Sprintf("updateDNSRecord: FQDN '%s' updated ", fqdn)
+					outChannel <- fmt.Sprintf("prepareAndUpdateDNSRecord: FQDN '%s' updated ", fqdn)
 				}
 			} else {
 				return
@@ -293,14 +226,12 @@ func (s *Storage) updateDNSRecord(ctx context.Context, fqdn string) error {
 
 	resolverResponse, err := dnslookuper.ResolveDNSWithTTL(fqdn)
 	if err != nil {
-		slog.Error(fmt.Errorf("updateDNSRecord: error resolving fqdn: %w", err).Error())
 		err = fmt.Errorf("updateDNSRecord: error resolving fqdn: %w", err)
 		return err
 	}
 
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		slog.Error(fmt.Errorf("updateDNSRecord: error beginning transaction: %w", err).Error())
 		err = fmt.Errorf("updateDNSRecord: error beginning transaction: %w", err)
 		return err
 	}
@@ -308,7 +239,6 @@ func (s *Storage) updateDNSRecord(ctx context.Context, fqdn string) error {
 
 	_, err = tx.Exec("UPDATE fqdns SET outdated = TRUE WHERE fqdn = $1", fqdn)
 	if err != nil {
-		slog.Error(fmt.Errorf("updateDNSRecord: error updating outdated fields: %w", err).Error())
 		err = fmt.Errorf("updateDNSRecord: error updating outdated fields: %w", err)
 		return err
 	}
@@ -320,7 +250,6 @@ func (s *Storage) updateDNSRecord(ctx context.Context, fqdn string) error {
 		_, err := tx.Exec(`INSERT INTO ip_addresses (ip_address) VALUES ($1)
 			ON CONFLICT (ip_address) DO NOTHING;`, ipAddress)
 		if err != nil {
-			slog.Error(fmt.Errorf("updateDNSRecord: error inserting ip addresses: %w", err).Error())
 			err = fmt.Errorf("updateDNSRecord: error inserting ip addresses: %w", err)
 			return err
 		}
@@ -332,20 +261,17 @@ func (s *Storage) updateDNSRecord(ctx context.Context, fqdn string) error {
 			DO UPDATE SET ttl = EXCLUDED.ttl, outdated = FALSE WHERE fqdns.fqdn = EXCLUDED.fqdn AND fqdns.ip_address = EXCLUDED.ip_address;`, fqdn, ipAddress, expiresAt)
 
 		if err != nil {
-			slog.Error(fmt.Errorf("updateDNSRecord: error inserting into fqdn: %w", err).Error())
 			err = fmt.Errorf("updateDNSRecord: error inserting into fqdn: %w", err)
 			return err
 		}
 	}
 	_, err = tx.Exec("DELETE FROM fqdns WHERE fqdn = $1 AND ip_address IS NULL", fqdn)
 	if err != nil {
-		slog.Error(fmt.Errorf("updateDNSRecord: error deleting FQDNs with NULL ip: %w", err).Error())
 		err = fmt.Errorf("updateDNSRecord: error deleting FQDNs with NULL ip: %w", err)
 		return err
 	}
 	err = tx.Commit()
 	if err != nil {
-		slog.Error(fmt.Errorf("updateDNSRecord: error committing transaction: %w", err).Error())
 		err = fmt.Errorf("updateDNSRecord: error committing transaction: %w", err)
 		return err
 	}
@@ -408,7 +334,7 @@ func mergeErrorChans(ctx context.Context, ce ...<-chan error) <-chan error {
 	return out
 }
 
-func (s *Storage) sink(ctx context.Context, cancel context.CancelFunc, fqdns <-chan string, errors <-chan error) {
+func (s *Storage) fqdnConsumer(ctx context.Context, cancel context.CancelFunc, fqdns <-chan string, errors <-chan error) {
 	// consumer
 	for {
 		select {
@@ -418,12 +344,13 @@ func (s *Storage) sink(ctx context.Context, cancel context.CancelFunc, fqdns <-c
 
 		case err, ok := <-errors:
 			if ok {
+				cancel()
 				log.Println(err.Error())
 			}
 
 		case fqdn, ok := <-fqdns:
 			if ok {
-				fmt.Println(fqdn)
+				log.Println(fqdn)
 			} else {
 				return
 			}

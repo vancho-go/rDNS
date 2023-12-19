@@ -27,7 +27,7 @@ func ResolveDNSWithTTL(dnsName string) (result []ResolverResponse, err error) {
 		return nil, fmt.Errorf("resolveDNSWithTTL: synchronous query for DNS %s failed: %w", dnsName, err)
 	}
 	if len(r.Answer) == 0 {
-		return nil, fmt.Errorf("resolveDNSWithTTL: no answers received for DNS name %s: %w", dnsName, err)
+		return nil, fmt.Errorf("resolveDNSWithTTL: no answers received for DNS name %s", dnsName)
 	}
 
 	result = make([]ResolverResponse, len(r.Answer))
