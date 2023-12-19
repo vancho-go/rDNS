@@ -332,9 +332,9 @@ func (s *Storage) fqdnConsumer(ctx context.Context, cancel context.CancelFunc, f
 }
 
 func (s *Storage) GetFQDNs(ctx context.Context, ipAddresses models.APIGetFQDNsRequest) (models.APIGetFQDNsResponse, error) {
-	result := models.APIGetFQDNsResponse{make(map[string][]string, len(ipAddresses.IPAddresses))}
+	result := models.APIGetFQDNsResponse{IPAddresses: make(map[string][]string, len(ipAddresses.IPAddresses))}
 	for _, ip := range ipAddresses.IPAddresses {
-		fqdns := []string{}
+		var fqdns []string
 		query := `SELECT fqdn FROM fqdns WHERE ip_address = $1;`
 		rows, err := s.DB.QueryContext(ctx, query, ip)
 		if err != nil {

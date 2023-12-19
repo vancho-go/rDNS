@@ -30,6 +30,6 @@ func main() {
 
 	err = http.ListenAndServe(":8090", r)
 	if err != nil {
-		log.Fatalf("error starting server: %w", err)
+		log.Fatalf("error starting server: %s", err.Error())
 	}
 }
