@@ -1,11 +1,9 @@
 package main
 
 import (
-	"github.com/go-chi/chi/v5"
-	"github.com/vancho-go/rDNS/internal/app/handlers"
+	"context"
 	"github.com/vancho-go/rDNS/internal/app/storage"
 	"log"
-	"net/http"
 )
 
 // only for testing purposes
@@ -21,16 +19,20 @@ func main() {
 	}
 	_ = dbInstance
 
-	r := chi.NewRouter()
+	ctx := context.Background()
 
-	r.Route("/api", func(r chi.Router) {
-		r.Group(func(r chi.Router) {
-			r.Get("/ip", handlers.GetFQNDs(dbInstance))
-		})
-	})
-
-	err = http.ListenAndServe(":8090", r)
-	if err != nil {
-		log.Fatalf("error starting server: %w", err)
-	}
+	dbInstance.UpdateDNSRecordsNew(ctx)
+	//
+	//r := chi.NewRouter()
+	//
+	//r.Route("/api", func(r chi.Router) {
+	//	r.Group(func(r chi.Router) {
+	//		r.Get("/ip", handlers.GetFQNDs(dbInstance))
+	//	})
+	//})
+	//
+	//err = http.ListenAndServe(":8090", r)
+	//if err != nil {
+	//	log.Fatalf("error starting server: %w", err)
+	//}
 }
