@@ -11,3 +11,9 @@ type APIGetFQDNsRequest struct {
 type APIGetFQDNsResponse struct {
 	IPAddresses map[string][]string
 }
+
+type ResolverResponse struct {
+	DNSName   string
+	IPAddress string
+	ExpiresAt string
+}
