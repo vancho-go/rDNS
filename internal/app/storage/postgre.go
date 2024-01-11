@@ -204,7 +204,7 @@ func (s *Storage) prepareAndUpdateDNSRecordBatch(ctx context.Context, fqdns <-ch
 		defer close(outChannel)
 		defer close(errorChannel)
 
-		batchSize := 1500 // Установите желаемый размер пакета
+		batchSize := 1500
 		var batch []string
 
 		for fqdn := range fqdns {
@@ -218,10 +218,10 @@ func (s *Storage) prepareAndUpdateDNSRecordBatch(ctx context.Context, fqdns <-ch
 						outChannel <- fmt.Sprintf("prepareAndUpdateDNSRecord: FQDN '%s' updated ", bFqdn)
 					}
 				}
-				batch = batch[:0] // Очищаем пакет для следующего использования
+				batch = batch[:0] // очищаем пакет для следующего использования
 			}
 		}
-		// Обрабатываем оставшиеся записи, если они есть
+		// обрабатываем оставшиеся записи, если они остались
 		if len(batch) > 0 {
 			err := s.updateDNSRecordsBatch(ctx, batch)
 			if err != nil {
