@@ -330,14 +330,14 @@ func (s *Storage) fqdnConsumer(ctx context.Context, cancel context.CancelFunc, f
 				//cancel()
 				atomic.AddInt64(fqdnProcessed, 1)
 				_ = err
-				//log.Println(err.Error())
+				log.Println(err.Error())
 			}
 
 		case fqdn, ok := <-fqdns:
 			if ok {
 				atomic.AddInt64(fqdnProcessed, 1)
 				_ = fqdn
-				//log.Println(fqdn)
+				log.Println(fqdn)
 			} else {
 				return
 			}
