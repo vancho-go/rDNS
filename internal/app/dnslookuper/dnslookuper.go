@@ -12,7 +12,7 @@ type ResolverResponse struct {
 	ExpiresAt string
 }
 
-func ResolveDNSWithTTLBatch(dnsNames []string) (results map[string][]models.ResolverResponse, err error) {
+func ResolveDNSWithTTLBatch(dnsNames []string, errorChannel chan<- error) (results map[string][]models.ResolverResponse, err error) {
 	config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
 	if err != nil {
 		return nil, fmt.Errorf("resolveDNSWithTTLBatch: error reading /etc/resolv.conf: %w", err)
@@ -28,9 +28,11 @@ func ResolveDNSWithTTLBatch(dnsNames []string) (results map[string][]models.Reso
 
 		r, _, err := c.Exchange(m, config.Servers[0]+":"+config.Port)
 		if err != nil {
-			return nil, fmt.Errorf("resolveDNSWithTTLBatch: synchronous query for DNS %s failed: %w", dnsName, err)
+			errorChannel <- fmt.Errorf("resolveDNSWithTTLBatch: error querying address: %v", err)
+			continue
 		}
 		if len(r.Answer) == 0 {
+			errorChannel <- fmt.Errorf("prepareAndUpdateDNSRecordBatch: error resolving fqdn  %s", dnsName)
 			results[dnsName] = []models.ResolverResponse{} // Нет ответов для данного DNS-имени
 			continue
 		}

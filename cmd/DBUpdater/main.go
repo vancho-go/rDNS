@@ -47,10 +47,10 @@ func main() {
 
 	go periodicUpdateExecutor(ctx, updateInterval, dbInstance.UpdateDNSRecords, &fqdnProcessed)
 
-	timer := time.After(10 * time.Minute)
+	timer := time.After(5 * time.Minute)
 	<-timer
 	cancel()
-	fmt.Printf("FQDNs processed in 10 min: %d\n\n", fqdnProcessed)
+	fmt.Printf("FQDNs processed in 5 min: %d\n\n", fqdnProcessed)
 
 	r := chi.NewRouter()
 

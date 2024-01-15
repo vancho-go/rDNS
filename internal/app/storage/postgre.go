@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v4/stdlib"
 	"github.com/vancho-go/rDNS/internal/app/dnslookuper"
 	"github.com/vancho-go/rDNS/internal/app/models"
+	"golang.org/x/sync/semaphore"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -126,6 +127,14 @@ func fqdnsToPgxRows(requests []models.APIUploadFQDNRequest) [][]interface{} {
 func (s *Storage) UpdateDNSRecords(ctx context.Context, fqdnProcessed *int64) {
 	//	здесь будут запускаться задачи
 
+	// Определяем максимальное количество одновременных операций резолвинга и записи в базу данных
+	maxConcurrentResolves := 4000
+	maxConcurrentWrites := 2000
+
+	// Cемафоры для резолва и обновления
+	resolveSem := semaphore.NewWeighted(int64(maxConcurrentResolves))
+	writeSem := semaphore.NewWeighted(int64(maxConcurrentWrites))
+
 	select {
 	case <-ctx.Done():
 		fmt.Println("updateDNSRecords: update task cancelled by context")
@@ -143,7 +152,7 @@ func (s *Storage) UpdateDNSRecords(ctx context.Context, fqdnProcessed *int64) {
 		var errors []<-chan error
 
 		for i := 0; i < 4000; i++ {
-			updateFQDNChannel, updateFQDNErrors, err := s.prepareAndUpdateDNSRecordBatch(ctx, outputFQDNsChannel)
+			updateFQDNChannel, updateFQDNErrors, err := s.prepareAndUpdateDNSRecordBatch(ctx, outputFQDNsChannel, resolveSem, writeSem)
 			if err != nil {
 				log.Println(err)
 				return
@@ -196,41 +205,79 @@ func (s *Storage) getOutdatedDNSRecords(ctx context.Context) (<-chan string, err
 	return outputChannel, nil
 }
 
-func (s *Storage) prepareAndUpdateDNSRecordBatch(ctx context.Context, fqdns <-chan string) (<-chan string, <-chan error, error) {
+func (s *Storage) prepareAndUpdateDNSRecordBatch(ctx context.Context, fqdns <-chan string, resolveSem, writeSem *semaphore.Weighted) (<-chan string, <-chan error, error) {
 	outChannel := make(chan string)
 	errorChannel := make(chan error)
+	batchSize := 1500
 
+	resolvedBatchCh := make(chan map[string][]models.ResolverResponse)
+
+	// Горутина для резолва
 	go func() {
-		defer close(outChannel)
-		defer close(errorChannel)
-
-		batchSize := 1500
+		defer close(resolvedBatchCh)
 		var batch []string
-
 		for fqdn := range fqdns {
 			batch = append(batch, fqdn)
 			if len(batch) >= batchSize {
-				err := s.updateDNSRecordsBatch(ctx, batch)
-				if err != nil {
-					errorChannel <- err
-				} else {
-					for _, bFqdn := range batch {
-						outChannel <- fmt.Sprintf("prepareAndUpdateDNSRecord: FQDN '%s' updated ", bFqdn)
-					}
+				if err := resolveSem.Acquire(ctx, 1); err != nil {
+					errorChannel <- fmt.Errorf("prepareAndUpdateDNSRecordBatch: error acquiring resolve semaphore: %v", err)
+					continue
 				}
-				batch = batch[:0] // очищаем пакет для следующего использования
+
+				resolverResponses, err := dnslookuper.ResolveDNSWithTTLBatch(batch, errorChannel)
+				resolveSem.Release(1)
+				if err != nil {
+					errorChannel <- fmt.Errorf("prepareAndUpdateDNSRecordBatch: error during resolving batch: %w", err)
+					return
+
+				} else {
+					resolvedBatchCh <- resolverResponses
+				}
+				batch = batch[:0] // очистка пакета для следующего использования
 			}
 		}
-		// обрабатываем оставшиеся записи, если они остались
+		// Обрабатываем оставшиеся записи, если они остались
 		if len(batch) > 0 {
-			err := s.updateDNSRecordsBatch(ctx, batch)
+			if err := resolveSem.Acquire(ctx, 1); err != nil {
+				errorChannel <- fmt.Errorf("prepareAndUpdateDNSRecordBatch: error acquiring resolve semaphore: %v", err)
+				return
+			}
+
+			resolverResponses, err := dnslookuper.ResolveDNSWithTTLBatch(batch, errorChannel)
+			resolveSem.Release(1)
 			if err != nil {
+				errorChannel <- fmt.Errorf("prepareAndUpdateDNSRecordBatch: error during resolving batch: %w", err)
+				return
+
+			} else {
+				resolvedBatchCh <- resolverResponses
+			}
+		}
+	}()
+
+	// Горутина для записи
+	go func() {
+		defer close(outChannel)
+		defer close(errorChannel)
+		for resolverResponses := range resolvedBatchCh {
+			if err := writeSem.Acquire(ctx, 1); err != nil {
+				errorChannel <- fmt.Errorf("prepareAndUpdateDNSRecordBatch: error acquiring write semaphore: %v", err)
+				continue
+			}
+
+			var fqdns []string
+			for fqdn := range resolverResponses {
+				fqdns = append(fqdns, fqdn)
+			}
+
+			if err := s.updateDNSRecordsBatch(ctx, fqdns, resolverResponses); err != nil {
 				errorChannel <- err
 			} else {
-				for _, bFqdn := range batch {
-					outChannel <- fmt.Sprintf("prepareAndUpdateDNSRecord: FQDN '%s' updated ", bFqdn)
+				for _, fqdn := range fqdns {
+					outChannel <- fmt.Sprintf("FQDN '%s' updated", fqdn)
 				}
 			}
+			writeSem.Release(1)
 		}
 	}()
 
@@ -266,12 +313,7 @@ func mergeChannels[T any](ctx context.Context, ce ...<-chan T) <-chan T {
 	return out
 }
 
-func (s *Storage) updateDNSRecordsBatch(ctx context.Context, fqdns []string) error {
-	resolverResponses, err := dnslookuper.ResolveDNSWithTTLBatch(fqdns)
-	if err != nil {
-		return fmt.Errorf("updateDNSRecordsBatch: error resolving fqdns: %w", err)
-	}
-
+func (s *Storage) updateDNSRecordsBatch(ctx context.Context, fqdns []string, resolverResponses map[string][]models.ResolverResponse) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("updateDNSRecordsBatch: error beginning transaction: %w", err)
